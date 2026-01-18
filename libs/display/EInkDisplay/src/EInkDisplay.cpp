@@ -415,9 +415,13 @@ void EInkDisplay::displayBuffer(RefreshMode mode) {
   }
 
   // If currently in grayscale mode, revert first to black/white
+  // BUT only for FAST_REFRESH - HALF/FULL refresh will overwrite entire screen anyway
+  // and calling grayscaleRevert() first causes a visible flash with old content
   if (inGrayscaleMode) {
     inGrayscaleMode = false;
-    grayscaleRevert();
+    if (mode == FAST_REFRESH) {
+      grayscaleRevert();
+    }
   }
 
   // Set up full screen RAM area
