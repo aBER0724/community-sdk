@@ -61,10 +61,10 @@ class EInkDisplay {
   // Access to frame buffer
   uint8_t* getFrameBuffer() const {
     return frameBuffer;
+  }
 
   // Force RED RAM to inverted buffer (for dark mode FAST_REFRESH optimization)
   void forceRedRamInverted();
-  }
 
   // Save the current framebuffer to a PBM file (desktop/test builds only)
   void saveFrameBufferAsPBM(const char* filename);

@@ -59,6 +59,41 @@ Then you can include the libraries in your project as usual:
 
 Or load tools from the `tools/` directory as needed.
 
+## 🚀 Usage Examples
+
+### EInkDisplay - Dark Mode Support
+
+The `EInkDisplay` library now supports dark mode rendering for improved nighttime reading experience:
+
+```cpp
+#include <EInkDisplay.h>
+
+EInkDisplay display;
+
+// Normal mode (default)
+display.displayGrayBuffer();  // or display.displayGrayBuffer(false, false)
+
+// Dark mode - inverted colors for reduced eye strain
+display.displayGrayBuffer(false, true);  // darkMode = true
+
+// With screen turn-off
+display.displayGrayBuffer(true, false);   // turnOffScreen=true, darkMode=false
+display.displayGrayBuffer(true, true);    // turnOffScreen=true, darkMode=true
+```
+
+**Features:**
+- ✅ **Backward compatible**: `darkMode` parameter defaults to `false`
+- ✅ **No visible flash**: Optimized grayscale handling prevents display artifacts
+- ✅ **Fast refresh support**: `forceRedRamInverted()` method for dark mode FAST_REFRESH optimization
+
+**Use cases:**
+- Nighttime reading (reduces eye strain)
+- High-contrast viewing in low-light environments
+- User preference for inverted display colors
+
+For more details, see `libs/display/EInkDisplay/` directory and check the header file documentation.
+
+
 ## 🤝 Contributing
 
 This is a **community-driven project** - contributions are not only welcome but encouraged!
