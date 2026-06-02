@@ -14,21 +14,30 @@ class EInkDisplay {
   enum RefreshMode {
     FULL_REFRESH,  // Full refresh with complete waveform
     HALF_REFRESH,  // Half refresh (1720ms) - balanced quality and speed
-    FAST_REFRESH   // Fast refresh using custom LUT
+    FAST_REFRESH,  // Fast refresh using custom LUT
+    DARK_REDRIVE   // Fast refresh with inverted RED RAM to re-drive all pixels
   };
 
   // Initialize the display hardware and driver
   void begin();
+  void setDisplayX3();
+  void requestResync(uint8_t count = 2);
 
   // Display dimensions
   static constexpr uint16_t DISPLAY_WIDTH = 800;
   static constexpr uint16_t DISPLAY_HEIGHT = 480;
   static constexpr uint16_t DISPLAY_WIDTH_BYTES = DISPLAY_WIDTH / 8;
   static constexpr uint32_t BUFFER_SIZE = DISPLAY_WIDTH_BYTES * DISPLAY_HEIGHT;
+  uint16_t getDisplayWidth() const { return DISPLAY_WIDTH; }
+  uint16_t getDisplayHeight() const { return DISPLAY_HEIGHT; }
+  uint16_t getDisplayWidthBytes() const { return DISPLAY_WIDTH_BYTES; }
+  uint32_t getBufferSize() const { return BUFFER_SIZE; }
 
   // Frame buffer operations
   void clearScreen(uint8_t color = 0xFF) const;
   void drawImage(const uint8_t* imageData, uint16_t x, uint16_t y, uint16_t w, uint16_t h, bool fromProgmem = false) const;
+  void drawImageTransparent(const uint8_t* imageData, uint16_t x, uint16_t y, uint16_t w, uint16_t h,
+                            bool fromProgmem = false) const;
 
 #ifndef EINK_DISPLAY_SINGLE_BUFFER_MODE
   void swapBuffers();
@@ -42,7 +51,7 @@ class EInkDisplay {
   void cleanupGrayscaleBuffers(const uint8_t* bwBuffer);
 #endif
 
-  void displayBuffer(RefreshMode mode = FAST_REFRESH);
+  void displayBuffer(RefreshMode mode = FAST_REFRESH, bool turnOffScreen = false);
   // EXPERIMENTAL: Windowed update - display only a rectangular region
   void displayWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h);
   void displayGrayBuffer(bool turnOffScreen = false, bool darkMode = false);
@@ -89,6 +98,8 @@ class EInkDisplay {
   bool customLutActive;
   bool inGrayscaleMode;
   bool drawGrayscale;
+  bool x3Mode;
+  uint8_t pendingResyncRefreshes;
 
   // Low-level display control
   void resetDisplay();

@@ -151,10 +151,19 @@ EInkDisplay::EInkDisplay(int8_t sclk, int8_t mosi, int8_t cs, int8_t dc, int8_t 
 #ifndef EINK_DISPLAY_SINGLE_BUFFER_MODE
       frameBufferActive(nullptr),
 #endif
-      customLutActive(false) {
+      isScreenOn(false),
+      customLutActive(false),
+      inGrayscaleMode(false),
+      drawGrayscale(false),
+      x3Mode(false),
+      pendingResyncRefreshes(0) {
   if (Serial) Serial.printf("[%lu] EInkDisplay: Constructor called\n", millis());
   if (Serial) Serial.printf("[%lu]   SCLK=%d, MOSI=%d, CS=%d, DC=%d, RST=%d, BUSY=%d\n", millis(), sclk, mosi, cs, dc, rst, busy);
 }
+
+void EInkDisplay::setDisplayX3() { x3Mode = true; }
+
+void EInkDisplay::requestResync(const uint8_t count) { pendingResyncRefreshes = count; }
 
 void EInkDisplay::begin() {
   if (Serial) Serial.printf("[%lu] EInkDisplay: begin() called\n", millis());
@@ -376,6 +385,34 @@ void EInkDisplay::drawImage(const uint8_t* imageData, const uint16_t x, const ui
   if (Serial) Serial.printf("[%lu]   Image drawn to frame buffer\n", millis());
 }
 
+void EInkDisplay::drawImageTransparent(const uint8_t* imageData, const uint16_t x, const uint16_t y, const uint16_t w,
+                                       const uint16_t h, const bool fromProgmem) const {
+  if (!frameBuffer) {
+    if (Serial) Serial.printf("[%lu]   ERROR: Frame buffer not allocated!\n", millis());
+    return;
+  }
+
+  const uint16_t imageWidthBytes = (w + 7) / 8;
+  for (uint16_t row = 0; row < h; row++) {
+    const uint16_t destY = y + row;
+    if (destY >= DISPLAY_HEIGHT) break;
+
+    for (uint16_t col = 0; col < w; col++) {
+      const uint16_t destX = x + col;
+      if (destX >= DISPLAY_WIDTH) break;
+
+      const uint16_t srcOffset = row * imageWidthBytes + (col / 8);
+      const uint8_t srcByte = fromProgmem ? pgm_read_byte(&imageData[srcOffset]) : imageData[srcOffset];
+      const bool transparent = ((srcByte >> (7 - (col % 8))) & 0x1) != 0;
+      if (!transparent) {
+        frameBuffer[destY * DISPLAY_WIDTH_BYTES + (destX / 8)] &= static_cast<uint8_t>(~(0x80 >> (destX % 8)));
+      }
+    }
+  }
+
+  if (Serial) Serial.printf("[%lu]   Transparent image drawn to frame buffer\n", millis());
+}
+
 void EInkDisplay::writeRamBuffer(uint8_t ramBuffer, const uint8_t* data, uint32_t size) {
   const char* bufferName = (ramBuffer == CMD_WRITE_RAM_BW) ? "BW" : "RED";
   const unsigned long startTime = millis();
@@ -441,9 +478,12 @@ void EInkDisplay::cleanupGrayscaleBuffers(const uint8_t* bwBuffer) {
 }
 #endif
 
-void EInkDisplay::displayBuffer(RefreshMode mode) {
+void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen) {
   if (!isScreenOn) {
     // Force half refresh if screen is off
+    mode = HALF_REFRESH;
+  } else if (pendingResyncRefreshes > 0 && mode != FULL_REFRESH && mode != HALF_REFRESH) {
+    // Resync requests need a non-differential waveform before returning to fast refreshes.
     mode = HALF_REFRESH;
   }
 
@@ -456,18 +496,20 @@ void EInkDisplay::displayBuffer(RefreshMode mode) {
   // Set up full screen RAM area
   setRamArea(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
 
-  if (mode != FAST_REFRESH) {
-    // For full refresh, write to both buffers before refresh
+  if (mode == FAST_REFRESH) {
+    // For fast refresh, write to BW buffer only. RED RAM contains the previous frame.
     writeRamBuffer(CMD_WRITE_RAM_BW, frameBuffer, BUFFER_SIZE);
-    writeRamBuffer(CMD_WRITE_RAM_RED, frameBuffer, BUFFER_SIZE);
-  } else {
-    // For fast refresh, write to BW buffer only
-    writeRamBuffer(CMD_WRITE_RAM_BW, frameBuffer, BUFFER_SIZE);
-    // In single buffer mode, the RED RAM should already contain the previous frame
-    // In dual buffer mode, we write back frameBufferActive which is the last frame
 #ifndef EINK_DISPLAY_SINGLE_BUFFER_MODE
     writeRamBuffer(CMD_WRITE_RAM_RED, frameBufferActive, BUFFER_SIZE);
 #endif
+  } else if (mode == DARK_REDRIVE) {
+    // For dark-mode fast refresh, compare the target frame against its inverse so every pixel is re-driven.
+    writeRamBuffer(CMD_WRITE_RAM_BW, frameBuffer, BUFFER_SIZE);
+    forceRedRamInverted();
+  } else {
+    // For full/half refresh, write to both buffers before refresh.
+    writeRamBuffer(CMD_WRITE_RAM_BW, frameBuffer, BUFFER_SIZE);
+    writeRamBuffer(CMD_WRITE_RAM_RED, frameBuffer, BUFFER_SIZE);
   }
 
 #ifndef EINK_DISPLAY_SINGLE_BUFFER_MODE
@@ -475,7 +517,7 @@ void EInkDisplay::displayBuffer(RefreshMode mode) {
 #endif
 
   // Refresh the display
-  refreshDisplay(mode);
+  refreshDisplay(mode, turnOffScreen);
 
 #ifdef EINK_DISPLAY_SINGLE_BUFFER_MODE
   // In single buffer mode always sync RED RAM after refresh to prepare for next fast refresh
@@ -573,20 +615,20 @@ void EInkDisplay::displayGrayBuffer(const bool turnOffScreen, const bool darkMod
 }
 
 void EInkDisplay::forceRedRamInverted() {
-  // Force RED RAM to inverted BW RAM content (for dark mode FAST_REFRESH)
-  // This prevents visual artifacts by pre-loading RED RAM with inverted data
+  // Force RED RAM to inverted BW RAM content (for dark mode FAST_REFRESH).
+  // Stream bytes directly to avoid allocating a second 48KB framebuffer on ESP32-C3.
   setRamArea(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+  sendCommand(CMD_WRITE_RAM_RED);
 
   for (uint32_t i = 0; i < BUFFER_SIZE; i++) {
-    uint8_t inverted = ~frameBuffer[i];
-    sendData(inverted);
+    sendData(static_cast<uint8_t>(~frameBuffer[i]));
   }
 }
 
 void EInkDisplay::refreshDisplay(const RefreshMode mode, const bool turnOffScreen) {
   // Configure Display Update Control 1
   sendCommand(CMD_DISPLAY_UPDATE_CTRL1);
-  sendData((mode == FAST_REFRESH) ? CTRL1_NORMAL : CTRL1_BYPASS_RED);  // Configure buffer comparison mode
+  sendData((mode == FAST_REFRESH || mode == DARK_REDRIVE) ? CTRL1_NORMAL : CTRL1_BYPASS_RED);  // Configure buffer comparison mode
 
   // best guess at display mode bits:
   // bit | hex | name                    | effect
@@ -627,7 +669,10 @@ void EInkDisplay::refreshDisplay(const RefreshMode mode, const bool turnOffScree
   }
 
   // Power on and refresh display
-  const char* refreshType = (mode == FULL_REFRESH) ? "full" : (mode == HALF_REFRESH) ? "half" : "fast";
+  const char* refreshType = (mode == FULL_REFRESH)     ? "full"
+                            : (mode == HALF_REFRESH) ? "half"
+                            : (mode == DARK_REDRIVE) ? "dark-redrive"
+                                                     : "fast";
   if (Serial) Serial.printf("[%lu]   Powering on display 0x%02X (%s refresh)...\n", millis(), displayMode, refreshType);
   sendCommand(CMD_DISPLAY_UPDATE_CTRL2);
   sendData(displayMode);
@@ -637,6 +682,10 @@ void EInkDisplay::refreshDisplay(const RefreshMode mode, const bool turnOffScree
   // Wait for display to finish updating
   if (Serial) Serial.printf("[%lu]   Waiting for display refresh...\n", millis());
   waitWhileBusy(refreshType);
+
+  if (pendingResyncRefreshes > 0 && (mode == FULL_REFRESH || mode == HALF_REFRESH)) {
+    pendingResyncRefreshes--;
+  }
 }
 
 void EInkDisplay::setCustomLUT(const bool enabled, const unsigned char* lutData) {
