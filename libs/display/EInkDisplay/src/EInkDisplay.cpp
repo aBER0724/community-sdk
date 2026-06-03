@@ -1,5 +1,6 @@
 #include "EInkDisplay.h"
 
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <vector>
@@ -853,6 +854,13 @@ void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen) {
       sendCommand(0x13);
       sendMirroredPlane(frameBuffer, false);
 
+      // DARK_REDRIVE on X3: write inverted frame to 0x10 reference plane
+      // so all pixels appear changed and get re-driven with the fast waveform.
+      if (mode == DARK_REDRIVE) {
+        sendCommand(0x10);
+        sendMirroredPlane(frameBuffer, true);
+      }
+
       sendCommandDataByteX3(0x50, 0x29, 0x07);
     }
 
@@ -934,6 +942,39 @@ void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen) {
     return;
   }
 
+  // DARK_REDRIVE: Invert framebuffer → RED RAM, restore → BW RAM, then fast-refresh.
+  // Forces all pixels to appear "changed" to the controller, re-driving them with the
+  // fast waveform. Prevents dark-mode ghosting without the visible flash of HALF_REFRESH.
+  if (mode == DARK_REDRIVE) {
+    setRamArea(0, 0, displayWidth, displayHeight);
+
+    // In-place invert for RED RAM — controller sees every pixel as different.
+    for (uint32_t i = 0; i < bufferSize; i++) {
+      frameBuffer[i] = static_cast<uint8_t>(~frameBuffer[i]);
+    }
+    writeRamBuffer(CMD_WRITE_RAM_RED, frameBuffer, bufferSize);
+
+    // Restore original framebuffer for BW RAM.
+    for (uint32_t i = 0; i < bufferSize; i++) {
+      frameBuffer[i] = static_cast<uint8_t>(~frameBuffer[i]);
+    }
+    writeRamBuffer(CMD_WRITE_RAM_BW, frameBuffer, bufferSize);
+
+#ifndef EINK_DISPLAY_SINGLE_BUFFER_MODE
+    swapBuffers();
+#endif
+
+    // Refresh using the fast waveform (same LUT as FAST_REFRESH).
+    refreshDisplay(FAST_REFRESH, turnOffScreen);
+
+#ifdef EINK_DISPLAY_SINGLE_BUFFER_MODE
+    // Re-sync RED RAM with current frame for next fast refresh.
+    setRamArea(0, 0, displayWidth, displayHeight);
+    writeRamBuffer(CMD_WRITE_RAM_RED, frameBuffer, bufferSize);
+#endif
+    return;
+  }
+
   // Set up full screen RAM area
   setRamArea(0, 0, displayWidth, displayHeight);
 
@@ -943,10 +984,6 @@ void EInkDisplay::displayBuffer(RefreshMode mode, const bool turnOffScreen) {
 #ifndef EINK_DISPLAY_SINGLE_BUFFER_MODE
     writeRamBuffer(CMD_WRITE_RAM_RED, frameBufferActive, bufferSize);
 #endif
-  } else if (mode == DARK_REDRIVE) {
-    // For dark-mode fast refresh, compare the target frame against its inverse so every pixel is re-driven.
-    writeRamBuffer(CMD_WRITE_RAM_BW, frameBuffer, bufferSize);
-    forceRedRamInverted();
   } else {
     // For full/half refresh, write to both buffers before refresh.
     writeRamBuffer(CMD_WRITE_RAM_BW, frameBuffer, bufferSize);
@@ -1039,21 +1076,28 @@ void EInkDisplay::displayWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h, 
   // Post-refresh: Sync RED RAM with current window (for next fast refresh)
   setRamArea(x, y, w, h);
   writeRamBuffer(CMD_WRITE_RAM_RED, windowBuffer.data(), windowBufferSize);
+#else
+  // Keep the software "previous frame" buffer coherent with what the panel
+  // now shows inside this window. Otherwise repeated window updates diff
+  // against an older frame and accumulate visible ghosting.
+  for (uint16_t row = 0; row < h; row++) {
+    const uint16_t dstY = y + row;
+    const uint16_t dstOffset = dstY * displayWidthBytes + (x / 8);
+    memcpy(&frameBufferActive[dstOffset], &windowBuffer[row * windowWidthBytes], windowWidthBytes);
+  }
 #endif
 
   if (Serial) Serial.printf("[%lu]   Window display complete\n", millis());
 }
 
 void EInkDisplay::displayWindowDarkRedrive(uint16_t x, uint16_t y, uint16_t w, uint16_t h, const bool turnOffScreen) {
-  if (Serial) Serial.printf("[%lu]   Displaying dark-redrive window at (%d,%d) size (%dx%d)\n", millis(), x, y, w, h);
+  if (Serial) Serial.printf("[%lu]   Dark redrive window at (%d,%d) size (%dx%d)\n", millis(), x, y, w, h);
 
-  // Validate bounds
   if (x + w > displayWidth || y + h > displayHeight) {
     if (Serial) Serial.printf("[%lu]   ERROR: Window bounds exceed display dimensions!\n", millis());
     return;
   }
 
-  // Validate byte alignment
   if (x % 8 != 0 || w % 8 != 0) {
     if (Serial) Serial.printf("[%lu]   ERROR: Window x and width must be byte-aligned (multiples of 8)!\n", millis());
     return;
@@ -1064,49 +1108,57 @@ void EInkDisplay::displayWindowDarkRedrive(uint16_t x, uint16_t y, uint16_t w, u
     return;
   }
 
-  // displayWindowDarkRedrive is not supported while the rest of the screen has grayscale content, revert it
   if (inGrayscaleMode) {
     inGrayscaleMode = false;
     grayscaleRevert();
   }
 
-  // Calculate window buffer size
   const uint16_t windowWidthBytes = w / 8;
   const uint32_t windowBufferSize = windowWidthBytes * h;
+  auto* windowBuffer = static_cast<uint8_t*>(malloc(windowBufferSize));
+  if (windowBuffer == nullptr) {
+    if (Serial)
+      Serial.printf("[%lu]   ERROR: Window buffer allocation failed, falling back to full dark redrive\n", millis());
+    displayBuffer(DARK_REDRIVE, turnOffScreen);
+    return;
+  }
 
-  if (Serial) Serial.printf("[%lu]   Window buffer size: %lu bytes (%d x %d pixels)\n", millis(), windowBufferSize, w, h);
-
-  std::vector<uint8_t> windowBuffer(windowBufferSize);
-  std::vector<uint8_t> invertedWindowBuffer(windowBufferSize);
-
-  // Extract window region from frame buffer and prepare its inverse for RED RAM.
   for (uint16_t row = 0; row < h; row++) {
     const uint16_t srcY = y + row;
     const uint16_t srcOffset = srcY * displayWidthBytes + (x / 8);
     const uint16_t dstOffset = row * windowWidthBytes;
     memcpy(&windowBuffer[dstOffset], &frameBuffer[srcOffset], windowWidthBytes);
-    for (uint16_t col = 0; col < windowWidthBytes; col++) {
-      invertedWindowBuffer[dstOffset + col] = static_cast<uint8_t>(~windowBuffer[dstOffset + col]);
-    }
   }
 
-  // Configure RAM area for window
+  for (uint32_t i = 0; i < windowBufferSize; i++) {
+    windowBuffer[i] = static_cast<uint8_t>(~windowBuffer[i]);
+  }
+
   setRamArea(x, y, w, h);
+  writeRamBuffer(CMD_WRITE_RAM_RED, windowBuffer, windowBufferSize);
 
-  // Write target data to BW RAM and inverted target data to RED RAM so every pixel is re-driven.
-  writeRamBuffer(CMD_WRITE_RAM_BW, windowBuffer.data(), windowBufferSize);
-  writeRamBuffer(CMD_WRITE_RAM_RED, invertedWindowBuffer.data(), windowBufferSize);
+  for (uint32_t i = 0; i < windowBufferSize; i++) {
+    windowBuffer[i] = static_cast<uint8_t>(~windowBuffer[i]);
+  }
 
-  // Perform dark-redrive refresh
-  refreshDisplay(DARK_REDRIVE, turnOffScreen);
+  writeRamBuffer(CMD_WRITE_RAM_BW, windowBuffer, windowBufferSize);
+
+  refreshDisplay(FAST_REFRESH, turnOffScreen);
 
 #ifdef EINK_DISPLAY_SINGLE_BUFFER_MODE
-  // Post-refresh: Sync RED RAM with current window (for next fast refresh)
   setRamArea(x, y, w, h);
-  writeRamBuffer(CMD_WRITE_RAM_RED, windowBuffer.data(), windowBufferSize);
+  writeRamBuffer(CMD_WRITE_RAM_RED, windowBuffer, windowBufferSize);
+#else
+  for (uint16_t row = 0; row < h; row++) {
+    const uint16_t dstY = y + row;
+    const uint16_t dstOffset = dstY * displayWidthBytes + (x / 8);
+    memcpy(&frameBufferActive[dstOffset], &windowBuffer[row * windowWidthBytes], windowWidthBytes);
+  }
 #endif
 
-  if (Serial) Serial.printf("[%lu]   Dark-redrive window display complete\n", millis());
+  free(windowBuffer);
+
+  if (Serial) Serial.printf("[%lu]   Dark redrive window complete\n", millis());
 }
 
 void EInkDisplay::displayGrayBuffer(const bool turnOffScreen, const bool darkMode) {
