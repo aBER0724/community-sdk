@@ -1652,6 +1652,12 @@ void EInkDisplay::displayWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
 void EInkDisplay::displayWindowDarkRedrive(uint16_t x, uint16_t y, uint16_t w, uint16_t h, const bool turnOffScreen) {
   if (Serial) Serial.printf("[%lu]   Dark redrive window at (%d,%d) size (%dx%d)\n", millis(), x, y, w, h);
 
+  // Validate empty window
+  if (w == 0 || h == 0) {
+    if (Serial) Serial.printf("[%lu]   ERROR: Window dimensions cannot be zero!\n", millis());
+    return;
+  }
+
   if (x + w > displayWidth || y + h > displayHeight) {
     if (Serial) Serial.printf("[%lu]   ERROR: Window bounds exceed display dimensions!\n", millis());
     return;
@@ -1674,7 +1680,6 @@ void EInkDisplay::displayWindowDarkRedrive(uint16_t x, uint16_t y, uint16_t w, u
   }
 
   if (inGrayscaleMode) {
-    inGrayscaleMode = false;
     grayscaleRevert();
   }
 
