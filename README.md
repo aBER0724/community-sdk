@@ -61,35 +61,37 @@ Or load tools from the `tools/` directory as needed.
 
 ## 🚀 Usage Examples
 
-### EInkDisplay - Dark Mode Support
+### EInkDisplay - Grayscale Display Support
 
-The `EInkDisplay` library now supports dark mode rendering for improved nighttime reading experience:
+The `EInkDisplay` library supports grayscale rendering with customizable LUTs:
 
 ```cpp
 #include <EInkDisplay.h>
 
 EInkDisplay display;
 
-// Normal mode (default)
-display.displayGrayBuffer();  // or display.displayGrayBuffer(false, false)
-
-// Dark mode - inverted colors for reduced eye strain
-display.displayGrayBuffer(false, true);  // darkMode = true
+// Basic grayscale display (uses default community LUT)
+display.displayGrayBuffer();
 
 // With screen turn-off
-display.displayGrayBuffer(true, false);   // turnOffScreen=true, darkMode=false
-display.displayGrayBuffer(true, true);    // turnOffScreen=true, darkMode=true
+display.displayGrayBuffer(true);
+
+// Using factory LUT for absolute grayscale mode
+display.displayGrayBuffer(false, lut_factory_quality, true);
+
+// Using custom LUT
+display.displayGrayBuffer(false, my_custom_lut, false);
 ```
 
 **Features:**
-- ✅ **Backward compatible**: `darkMode` parameter defaults to `false`
-- ✅ **No visible flash**: Optimized grayscale handling prevents display artifacts
-- ✅ **Fast refresh support**: `forceRedRamInverted()` method for dark mode FAST_REFRESH optimization
+- ✅ **Factory and custom LUT support**: Pass `nullptr` for default, or provide custom LUT
+- ✅ **Factory mode option**: Third parameter enables absolute grayscale mode
+- ✅ **X3 and X4 support**: Optimized for both panel types
 
 **Use cases:**
-- Nighttime reading (reduces eye strain)
-- High-contrast viewing in low-light environments
-- User preference for inverted display colors
+- Grayscale text rendering (anti-aliased fonts)
+- Image display with multiple gray levels
+- Sleep screen cover art
 
 For more details, see `libs/display/EInkDisplay/` directory and check the header file documentation.
 
